@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>🤖 AI Q&A Bot — Free Local (Ollama)</title>
+<style>
+  :root{--bg:#fff;--fg:#0b1020;--muted:#6b7280;--card:#f9fafb;--accent:#10a37f}
+  html,body{height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+  .wrap{max-width:1100px;margin:0 auto;padding:16px}
+  h1{margin:0 0 12px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid rgba(0,0,0,.08);border-radius:14px;padding:12px}
+  .live{min-height:48px;background:#eef2ff;border-radius:10px;padding:10px;white-space:pre-wrap}
+  label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+  textarea{width:100%;min-height:90px;border-radius:10px;border:1px solid rgba(0,0,0,.15);padding:10px;background:#fff;color:var(--fg);white-space:pre-wrap}
+  .log{display:flex;flex-direction:column;gap:10px;max-height:65vh;overflow:auto;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:10px}
+  .qa{border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:10px;white-space:pre-wrap}
+  .qa h3{margin:0 0 6px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🤖 AI Q&A Bot — Free Local (Ollama)</h1>
+  <div id="bannerArea"></div>
+
+  <div class="bar">
+    <label style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:13px;color:var(--muted)">Model:</span>
+      <input id="model" value="gemma3:4b" style="border-radius:8px;padding:6px 8px;border:1px solid rgba(0,0,0,.08)" />
+    </label>
+    <button id="startBtn">▶️ Ask question</button>
+    <button id="stopBtn" class="secondary" disabled>⏹ Stop</button>
+    <span class="status" id="srStatus">Speech: ready</span>
+    <span class="status" id="ssStatus">Speak: ready</span>
+   </div>
+
+  <div class="grid">
+    <section class="card">
+      <label>Your question (Bilingual)</label>
+      <div id="live" class="live" aria-live="polite"></div>
+
+      <div style="height:10px"></div>
+
+      <label for="answer">AI's answer (Bilingual)</label>
+      <textarea id="answer" placeholder="The AI's answer will appear here..." readonly></textarea>
+      
+      <div class="row" style="margin-top:8px">
+        <button id="speakBtn" class="secondary" disabled>🔊 Read Again</button>
+        <button id="clearBtn" class="secondary">🧽 Clear</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Q&A Log</h2>
+        <div class="status"><span id="count">0</span> items</div>
+      </div>
+      <div id="log" class="log"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const bannerArea = $('bannerArea');
+  const srStatus = $('srStatus');
+  const ssStatus = $('ssStatus');
+  const live = $('live');
+  const answer = $('answer');
+  const startBtn = $('startBtn');
+  const stopBtn = $('stopBtn');
+  const speakBtn = $('speakBtn');
+  const clearBtn = $('clearBtn');
+  const log = $('log');
+  const count = $('count');
+
+  // call the local proxy (removes Origin header)
+  const OLLAMA_URL = 'http://127.0.0.1:11434/api/chat';
+  addBanner(`Using proxy API URL: ${OLLAMA_URL}`, 'ok');
+  // model input value (user can type the name of a model installed on Ollama)
+  const modelInput = el => document.getElementById(el);
+  const MODEL_INPUT = modelInput('model');
+  // fallback message to show specific CLI commands when memory/GPU errors occur
+  const OLLAMA_EXE = '"C:\\Users\\trevo\\AppData\\Local\\Programs\\Ollama\\ollama.exe"';
+  const FALLBACK_MODEL = 'gemma3:4b';
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const synth = window.speechSynthesis;
+  let recognition=null, recognizing=false, finalText='', qNum=0;
+
+  function addBanner(msg, cls){ const d=document.createElement('div'); d.className=`banner ${cls}`; d.textContent=msg; bannerArea.appendChild(d); setTimeout(()=>d.remove(), 10000); }
+  function escapeHTML(s){ return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+
+  // Quick connectivity check
+  fetch(OLLAMA_URL, {method:'OPTIONS'}).catch(()=>addBanner(`Tip: start Ollama and run: ${OLLAMA_EXE} run ${FALLBACK_MODEL}`, 'warn'));
+
+  function begin(){
+    if (!SR){ addBanner('This browser cannot listen (Web Speech API missing). You can type instead.', 'warn'); return; }
+    if (recognizing) return;
+    finalText=''; live.textContent='…listening…'; answer.value='';
+    startBtn.disabled=true; stopBtn.disabled=false; speakBtn.disabled=true;
+
+    recognition = new SR();
+    recognition.lang='en-GB'; recognition.interimResults=true; recognition.continuous=false;
+    recognition.onstart=()=>{ recognizing=true; srStatus.textContent='Speech: listening'; };
+    recognition.onerror=(e)=>{ srStatus.textContent='Speech: error'; addBanner('Speech error: '+(e.error||'unknown'), 'err'); };
+    recognition.onresult=(ev)=>{ let interim=''; for(let i=ev.resultIndex;i<ev.results.length;i++){ const txt=ev.results[i][0].transcript; if(ev.results[i].isFinal){ finalText += (finalText?' ':'') + txt.trim(); } else { interim += txt+' '; } } live.textContent=[finalText,interim].filter(Boolean).join(' '); };
+    recognition.onend=()=>{ recognizing=false; srStatus.textContent='Speech: idle'; stopBtn.disabled=true; startBtn.disabled=false; const q=finalText.trim(); if(q){ live.textContent=q; srStatus.textContent='AI: thinking…'; answer.value='…'; getAiAnswer(q); } };
+    try{ recognition.start(); }catch(err){ addBanner('Could not start mic — check permissions/HTTPS.', 'err'); srStatus.textContent='Speech: blocked'; stopBtn.disabled=true; startBtn.disabled=false; }
+  }
+  function halt(){ try{ recognition&&recognition.stop&&recognition.stop(); }catch(_){} }
+
+  async function getAiAnswer(question){
+    try{
+      // stronger system prompt — force the exact machine-friendly output
+      const system = `You are a helpful bilingual assistant. ONLY output EXACTLY one line with three parts separated by two pipe characters (||) and NOTHING ELSE.
+Format exactly like this:
+QUESTION_IN_CHINESE||ANSWER_IN_ENGLISH||ANSWER_IN_CHINESE
+Examples (must be single-line, no extra text, no bullets, no metadata):
+我想知道天气如何？||The weather is sunny and warm today.||今天晴朗且温暖。`;
+
+      const body = {
+        model: (MODEL_INPUT && MODEL_INPUT.value) ? MODEL_INPUT.value.trim() : FALLBACK_MODEL,
+        stream: false,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: `Here is my question: "${question}". Follow the format strictly.` }
+        ]
+      };
+
+      // Use the local Python proxy (browser → proxy → Ollama)
+      const PROXY_API = 'http://127.0.0.1:11435/api/chat';
+
+      // If your page has an API URL input, set it so UI shows the proxy
+      const apiInput = document.getElementById('apiUrl');
+      if (apiInput) apiInput.value = PROXY_API;
+
+      // When sending the request, use PROXY_API instead of a direct Ollama URL:
+      const res = await fetch(PROXY_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        mode: 'cors'
+      });
+
+      const raw = await res.text();
+      // detect common Ollama memory/GPU error and give exact next steps
+      if (!res.ok){
+         const msg = raw || `HTTP ${res.status}`;
+         addBanner(`API ERROR • ${msg}`, 'err');
+         // if model requires more system memory, show CLI guidance
+         if ((raw||'').toLowerCase().includes('requires more system memory') || (raw||'').toLowerCase().includes('unable to load full model')) {
+           addBanner('Model needs too much GPU/RAM. In PowerShell run:','warn');
+           addBanner(`${OLLAMA_EXE} list  → see installed models`, 'warn');
+           addBanner(`${OLLAMA_EXE} pull <smaller-model-name>  → download a lighter model (see https://ollama.ai/models)`, 'warn');
+           addBanner(`${OLLAMA_EXE} run <smaller-model-name>  → start the smaller model and keep this terminal open`, 'warn');
+           answer.value = `Sorry, I had a problem.\n${raw}\n\nCheck installed models and run a lighter model using the commands shown in the banner.`;
+         } else {
+           answer.value = `Sorry, I had a problem.\n${raw}`;
+         }
+         srStatus.textContent='Speech: error';
+         return;
+       }
+
+      // parse response (handle single JSON or NDJSON streaming chunks)
+      let aiText = '';
+      try {
+        const data = JSON.parse(raw);
+        aiText = data.message?.content ?? (typeof data === 'string' ? data : '');
+      } catch (e) {
+        // try NDJSON: join message.content fragments from each line
+        try {
+          const lines = raw.split(/\r?\n/).filter(Boolean);
+          const pieces = [];
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line);
+              if (obj && obj.message && typeof obj.message.content === 'string') pieces.push(obj.message.content);
+            } catch (_) { /* ignore bad lines */ }
+          }
+          aiText = pieces.join('').trim() || raw;
+        } catch (_) {
+          aiText = raw;
+        }
+      }
+
+      const parts = (aiText || '').split('||');
+      let qZh='', aEn='', aZh='';
+      if (parts.length >= 3) {
+        qZh = parts[0].trim();
+        aEn = parts[1].trim();
+        aZh = parts[2].trim();
+      } else {
+        // fallback: treat entire response as the English answer so the page still works
+        qZh = '(no Chinese translation provided)';
+        aEn = aiText.trim() || 'No answer returned.';
+        aZh = '(no Chinese translation provided)';
+        addBanner('Model did not follow the strict "part1||part2||part3" format — showing raw output as English answer.', 'warn');
+      }
+       live.textContent = `${question}\n${qZh}`;
+       const bilingual = `${aEn}\n\n${aZh}`;
+       answer.value = bilingual;
+       srStatus.textContent='Speech: ready';
+       speakAgain();
+       addEntry(live.textContent, bilingual);
+
+    }catch(e){
+      addBanner('JS ERROR • '+(e.message||e), 'err');
+      answer.value='Sorry, I had a problem.\n'+(e.message||e);
+      srStatus.textContent='Speech: error';
+    }
+  }
+
+  function speakAgain(){
+    if (!synth) return;
+    const [en, zh] = answer.value.split(/\n\s*\n/);
+    const q=[]; if(en){ const u1=new SpeechSynthesisUtterance(en); u1.lang='en-GB'; q.push(u1); }
+    if(zh){ const u2=new SpeechSynthesisUtterance(zh); u2.lang='zh-CN'; q.push(u2); }
+    if (!q.length) return;
+    ssStatus.textContent='Speak: speaking…';
+    let i=0; const next=()=>{ if(i>=q.length){ ssStatus.textContent='Speak: ready'; speakBtn.disabled=false; return; } const u=q[i++]; u.onend=next; u.onerror=()=>ssStatus.textContent='Speak: error'; if(synth.speaking) synth.cancel(); synth.speak(u); }; next();
+  }
+
+  function addEntry(q,a){
+    qNum++;
+    const ts = new Date();
+    const node = document.createElement('article'); node.className='qa';
+    node.innerHTML = `<h3>Q#${qNum} • ${ts.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</h3>
+      <div><strong>Question (Bilingual):</strong> ${escapeHTML(q)}</div>
+      <div><strong>Answer (Bilingual):</strong> ${escapeHTML(a)}</div>`;
+    log.appendChild(node);
+    count.textContent = String(qNum);
+  }
+
+  startBtn.onclick = begin;
+  stopBtn.onclick = halt;
+  speakBtn.onclick = speakAgain;
+  clearBtn.onclick = ()=>{ live.textContent=''; finalText=''; answer.value=''; speakBtn.disabled=true; if(synth.speaking) synth.cancel(); };
+})();
+</script>
+</body>
+</html>
