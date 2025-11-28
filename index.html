@@ -79,7 +79,7 @@
   const count = $('count');
 
   // call the local proxy (removes Origin header)
-  const OLLAMA_URL = 'http://127.0.0.1:11434/api/chat';
+  const OLLAMA_URL = "http://localhost:11434/api/chat';
   addBanner(`Using proxy API URL: ${OLLAMA_URL}`, 'ok');
   // model input value (user can type the name of a model installed on Ollama)
   const modelInput = el => document.getElementById(el);
